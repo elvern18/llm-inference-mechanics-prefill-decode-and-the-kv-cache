@@ -90,3 +90,151 @@ def rope_is_relative(cos, sin, head_dim, seed=0):
 
     return abs(dot_at(5, 2) - dot_at(15, 12)) < 1e-4
 
+# Step 3 - GQAAttention
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F 
+
+class GQAAttention(nn.Module):
+    def __init__(self, d, n_heads, n_kv_heads, max_len=2048):
+        super().__init__()
+        # TODO: head_dim, wq, wk, wv, wo, rotary buffers cos and sin
+        self.d = d 
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.max_len = max_len 
+        self.head_dim = d // n_heads 
+
+        self.wq = nn.Linear(d, d, bias=False)
+        self.wk = nn.Linear(d, n_kv_heads * self.head_dim, bias=False)
+        self.wv = nn.Linear(d, n_kv_heads * self.head_dim, bias=False)
+        self.wo = nn.Linear(d, d, bias=False)
+
+        cos, sin = rope_cache(max_len, self.head_dim)
+        self.register_buffer("cos", cos, persistent=False)
+        self.register_buffer("sin", sin, persistent=False)
+
+
+    def forward(self, x, cache=None):
+        B, T, _ = x.shape
+
+        # -----------------------------------
+        # 1. Determine past sequence length
+        # -----------------------------------
+        if cache is None:
+            S_past = 0
+        else:
+            k_past, v_past = cache
+            S_past = k_past.shape[2]
+
+        # -----------------------------------
+        # 2. Project Q, K, V
+        # -----------------------------------
+        q = self.wq(x)
+        k = self.wk(x)
+        v = self.wv(x)
+
+        # -----------------------------------
+        # 3. Split into heads
+        # -----------------------------------
+        q = q.view(B, T, self.n_heads, self.head_dim)
+        k = k.view(B, T, self.n_kv_heads, self.head_dim)
+        v = v.view(B, T, self.n_kv_heads, self.head_dim)
+
+        # (B, T, heads, head_dim)
+        #        ↓
+        # (B, heads, T, head_dim)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        # -----------------------------------
+        # 4. Apply RoPE
+        # -----------------------------------
+        q = apply_rope(q, self.cos, self.sin, offset=S_past)
+        k = apply_rope(k, self.cos, self.sin, offset=S_past)
+
+        # -----------------------------------
+        # 5. Append to KV cache
+        # -----------------------------------
+        if cache is None:
+            k_all = k
+            v_all = v
+        else:
+            k_past, v_past = cache
+
+            k_all = torch.cat([k_past, k], dim=2)
+            v_all = torch.cat([v_past, v], dim=2)
+
+        # -----------------------------------
+        # 6. Expand KV heads to Q heads
+        # -----------------------------------
+        repeat_factor = self.n_heads // self.n_kv_heads
+
+        k_attn = k_all.repeat_interleave(
+            repeat_factor,
+            dim=1,
+        )
+        v_attn = v_all.repeat_interleave(
+            repeat_factor,
+            dim=1,
+        )
+
+        # -----------------------------------
+        # 7. Attention scores
+        # -----------------------------------
+        scores = (
+            q @ k_attn.transpose(-2, -1)
+        ) / (self.head_dim ** 0.5)
+
+        # -----------------------------------
+        # 8. Causal mask
+        # -----------------------------------
+        S = k_all.shape[2]
+
+        query_positions = torch.arange(
+            S_past,
+            S_past + T,
+            device=x.device,
+        )
+
+        key_positions = torch.arange(
+            S,
+            device=x.device,
+        )
+
+        mask = (
+            key_positions[None, :]
+            <= query_positions[:, None]
+        )
+
+        scores = scores.masked_fill(
+            ~mask,
+            float("-inf"),
+        )
+
+        # -----------------------------------
+        # 9. Softmax
+        # -----------------------------------
+        attn = F.softmax(scores, dim=-1)
+
+        # -----------------------------------
+        # 10. Weighted sum of V
+        # -----------------------------------
+        out = attn @ v_attn
+
+        # -----------------------------------
+        # 11. Merge heads
+        # -----------------------------------
+        out = out.transpose(1, 2).contiguous()
+        out = out.view(B, T, self.d)
+
+        # -----------------------------------
+        # 12. Output projection
+        # -----------------------------------
+        out = self.wo(out)
+
+        # Return UNEXPANDED KV cache
+        return out, (k_all, v_all)
+
