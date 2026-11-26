@@ -414,3 +414,49 @@ def generate_recompute(model, prompt, n):
 
     return tokens, n
 
+# Step 6 - kv_cache_bytes
+import torch
+
+'''
+        "vocab": vocab,
+        "d": d,
+        "n_layers": n_layers,
+        "n_heads": n_heads,
+        "n_kv_heads": n_kv_heads,
+        "hidden": hidden,
+        "max_len": max_len,
+        '''
+
+def kv_bytes_per_token(cfg, bytes_per_elem):
+    return cfg['n_layers'] * 2 * cfg['n_kv_heads'] * cfg['d'] * bytes_per_elem // cfg['n_heads']
+
+def kv_cache_bytes(cfg, seq_len, batch, bytes_per_elem):
+    return batch * seq_len * kv_bytes_per_token(cfg, bytes_per_elem)
+
+def measured_cache_bytes(cache):
+    return sum(
+        tensor.numel() * tensor.element_size()
+        for layer in cache
+        for tensor in layer
+    )
+
+def max_context(cfg, memory_bytes, batch, bytes_per_elem, weight_bytes):
+    remaining_bytes = memory_bytes - weight_bytes
+    seq_len = 0 
+    while kv_cache_bytes(cfg, seq_len + 1, batch, bytes_per_elem) < remaining_bytes:
+        seq_len += 1 
+    return seq_len 
+    
+def cache_growth(model, prompt,n):
+    measure_cache_bytes_at_each_step = [] 
+    logits, cache = prefill(model, prompt) 
+    measure_cache_bytes_at_each_step.append(measured_cache_bytes(cache)) 
+    token = torch.argmax(logits)
+
+    for _ in range(n): 
+        logits, cache = decode_step(model, token.item(), cache)
+        measure_cache_bytes_at_each_step.append(measured_cache_bytes(cache)) 
+        token = torch.argmax(logits)
+    
+    return measure_cache_bytes_at_each_step
+
