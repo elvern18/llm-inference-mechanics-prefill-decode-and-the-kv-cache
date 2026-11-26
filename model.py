@@ -506,3 +506,44 @@ def prefill_flops(cfg, n):
 def decode_flops(cfg, context_len):
     return flops_per_token(cfg, context_len)
 
+# Step 8 - arithmetic_intensity
+def weight_bytes(cfg, bytes_per_elem):
+    return param_count(cfg) * bytes_per_elem
+
+def decode_bytes(cfg, batch, context_len, bytes_per_elem):
+    total_bytes = weight_bytes(cfg, bytes_per_elem)
+    total_bytes += batch * (1 + context_len) * kv_bytes_per_token(cfg, bytes_per_elem)
+    return total_bytes 
+
+def prefill_bytes(cfg, batch, n, bytes_per_elem):
+    return weight_bytes(cfg, bytes_per_elem) + batch * n * kv_bytes_per_token(cfg, bytes_per_elem)
+
+def arithmetic_intensity(cfg, batch, context_len, bytes_per_elem, phase):
+    if phase == 'decode':
+        flops = decode_flops(cfg, context_len) * batch 
+        memory = decode_bytes(cfg, batch, context_len, bytes_per_elem) 
+    else:
+        flops = prefill_flops(cfg, context_len) * batch 
+        memory = prefill_bytes(cfg, batch, context_len, bytes_per_elem)
+
+    return flops / memory 
+
+def bound(intensity, ops_per_byte):
+    return "memory" if intensity < ops_per_byte else "compute"
+
+def crossover_batch(cfg, context_len, bytes_per_elem, ops_per_byte, max_batch=4096):
+    batch = 1
+
+    while batch <= max_batch:
+        flops = batch * decode_flops(cfg, context_len)
+        memory = decode_bytes(cfg, batch, context_len, bytes_per_elem)
+
+        intensity = flops / memory
+
+        if intensity >= ops_per_byte:
+            return batch
+
+        batch *= 2
+
+    return None
+
