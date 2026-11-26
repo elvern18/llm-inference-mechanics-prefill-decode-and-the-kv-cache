@@ -460,3 +460,49 @@ def cache_growth(model, prompt,n):
     
     return measure_cache_bytes_at_each_step
 
+# Step 7 - flops_per_token
+def param_count(cfg):
+    d = cfg['d']
+    vocab = cfg['vocab']
+    n_layers = cfg['n_layers']
+    n_heads = cfg['n_heads']
+    n_kv_heads = cfg['n_kv_heads'] 
+    hidden = cfg['hidden']
+
+    return vocab * d + n_layers * (
+        2 * d * d + 2 * d * n_kv_heads * d // n_heads + 3 * d * hidden + 2 * d
+    ) + d + d * vocab
+
+def matmul_params(cfg):
+    d = cfg['d']
+    vocab = cfg['vocab']
+    n_layers = cfg['n_layers']
+    n_heads = cfg['n_heads']
+    n_kv_heads = cfg['n_kv_heads'] 
+    hidden = cfg['hidden']
+
+    return n_layers * (
+        2 * d * d + 2 * d * n_kv_heads * d // n_heads + 3 * d * hidden 
+    ) + d * vocab
+
+def flops_per_token(cfg, context_len):
+    d = cfg['d']
+    vocab = cfg['vocab']
+    n_layers = cfg['n_layers']
+    n_heads = cfg['n_heads']
+    n_kv_heads = cfg['n_kv_heads'] 
+    hidden = cfg['hidden']
+
+    return 2 * matmul_params(cfg) + 4 * n_layers * d * context_len
+
+
+def prefill_flops(cfg, n):
+    return sum(
+        flops_per_token(cfg, context_len)
+        for context_len in range(1, n + 1)
+    )
+    
+
+def decode_flops(cfg, context_len):
+    return flops_per_token(cfg, context_len)
+
