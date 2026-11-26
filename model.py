@@ -547,3 +547,87 @@ def crossover_batch(cfg, context_len, bytes_per_elem, ops_per_byte, max_batch=40
 
     return None
 
+# Step 9 - time_phases
+import time
+import torch
+
+def time_call(fn, repeats=3):
+    if repeats <= 0:
+        return 0 
+    fn() 
+    min_time = float("inf")
+    for _ in range(repeats): 
+        start = time.perf_counter() 
+        fn() 
+        end = time.perf_counter() 
+        min_time = min(min_time, end - start)
+    return min_time 
+
+
+@torch.no_grad()
+def time_phases(model, prompt_len, n_new):
+
+    vocab = model.cfg["vocab"]
+
+    prompt = torch.arange(
+        prompt_len
+    ) % vocab
+
+    # Time prefill
+    prefill_s = time_call(lambda: prefill(model, prompt))
+
+    # Build cache for decode (outside timing)
+    next_logits, cache = prefill(model, prompt)
+
+    # Get a token to feed into decode
+    token = torch.argmax(next_logits).item()
+
+    # Time one decode step using the existing cache
+    decode_step_s = time_call(
+        lambda: decode_step(model, token, cache)
+    )
+
+    prefill_per_token_s = prefill_s / prompt_len
+
+    ratio = decode_step_s / prefill_per_token_s
+
+    return {
+        'prefill_s': round(prefill_s, 6),
+        'prefill_per_token_s': round(prefill_per_token_s, 6),
+        'decode_step_s': round(decode_step_s, 6),
+        'ratio': round(ratio, 6),
+    }
+
+
+@torch.no_grad()
+def time_decode_vs_batch(model, batches, context_len):
+
+    results = {}
+    vocab = model.cfg["vocab"]
+
+    for batch in batches:
+        prompt = torch.arange(context_len) % vocab
+        
+        # Repeat the same prompt for each sequence
+        prompt_batch = prompt.unsqueeze(0).repeat(batch, 1)
+
+        # Build KV cache for the whole batch
+        _, cache = model(prompt_batch)
+
+        token = 0
+
+        # Time one decode step across the batch
+        elapsed = time_call(
+            lambda: model(
+                torch.full(
+                    (batch, 1),
+                    token
+                ),
+                cache
+            )
+        )
+
+        results[batch] = round(elapsed, 6)
+
+    return results
+
