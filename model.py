@@ -238,3 +238,103 @@ class GQAAttention(nn.Module):
         # Return UNEXPANDED KV cache
         return out, (k_all, v_all)
 
+# Step 4 - TinyLM
+import torch
+import torch.nn as nn
+
+
+class TransformerBlock(nn.Module):
+    def __init__(self, d, n_heads, n_kv_heads, hidden, max_len):
+        super().__init__()
+
+        self.norm1 = RMSNorm(d)
+        self.attn = GQAAttention(
+            d,
+            n_heads,
+            n_kv_heads,
+            max_len=max_len,
+        )
+
+        self.norm2 = RMSNorm(d)
+        self.mlp = SwiGLU(d, hidden)
+
+    def forward(self, x, cache=None):
+        # Pre-norm attention + residual
+        h = self.norm1(x)
+        attn_out, new_cache = self.attn(h, cache)
+        x = x + attn_out
+
+        # Pre-norm MLP + residual
+        h = self.norm2(x)
+        x = x + self.mlp(h)
+
+        return x, new_cache
+
+
+class TinyLM(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg 
+
+        self.tok = nn.Embedding(cfg["vocab"], cfg["d"])
+
+        self.blocks = nn.ModuleList([
+            TransformerBlock(
+                d=cfg["d"],
+                n_heads=cfg["n_heads"],
+                n_kv_heads=cfg["n_kv_heads"],
+                hidden=cfg["hidden"],
+                max_len=cfg["max_len"],
+            )
+            for _ in range(cfg["n_layers"])
+        ])
+
+        self.norm = RMSNorm(cfg["d"])
+
+        self.head = nn.Linear(
+            cfg["d"],
+            cfg["vocab"],
+            bias=False,
+        )
+
+    def forward(self, idx, cache=None):
+        x = self.tok(idx)
+
+        new_cache = []
+
+        for i, block in enumerate(self.blocks):
+            layer_cache = None if cache is None else cache[i]
+
+            x, layer_new_cache = block(x, layer_cache)
+
+            new_cache.append(layer_new_cache)
+
+        x = self.norm(x)
+
+        logits = self.head(x)
+
+        return logits, new_cache
+
+
+def make_cfg(
+    vocab=64,
+    d=64,
+    n_layers=2,
+    n_heads=4,
+    n_kv_heads=2,
+    hidden=None,
+    max_len=2048,
+):
+    if hidden is None:
+        hidden = 4 * d
+
+    return {
+        "vocab": vocab,
+        "d": d,
+        "n_layers": n_layers,
+        "n_heads": n_heads,
+        "n_kv_heads": n_kv_heads,
+        "hidden": hidden,
+        "max_len": max_len,
+    }
+
