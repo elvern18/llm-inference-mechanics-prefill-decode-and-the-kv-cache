@@ -338,3 +338,79 @@ def make_cfg(
         "max_len": max_len,
     }
 
+# Step 5 - prefill
+import torch
+
+@torch.no_grad()
+def prefill(model, prompt):
+    next_logits, cache = model(prompt.unsqueeze(0))
+    next_logits = next_logits[0, -1, :]
+    return next_logits, cache
+
+@torch.no_grad()
+def decode_step(model, token, cache):
+    token = torch.tensor([[token]])
+    next_logits, cache = model(token, cache)
+    next_logits = next_logits[0, -1, :]
+    return next_logits, cache
+
+@torch.no_grad()
+def generate(model, prompt, n, greedy=True, gen=None):
+    # TODO: prefill once, then n decode passes; return (tokens, passes)
+    logits, cache = prefill(model, prompt) 
+
+    if greedy:
+        token = torch.argmax(logits).item() 
+    else:
+        probs = torch.softmax(logits, dim = -1)
+        token = torch.multinomial(probs, num_samples = 1, generator = gen).item() 
+
+    tokens = [token] 
+
+    # Generate remaining n - 1 tokens
+    for _ in range(n - 1):
+        next_logits, cache = decode_step(
+            model,
+            token,
+            cache
+        )
+
+        if greedy:
+            token = torch.argmax(next_logits).item()
+        else:
+            probs = torch.softmax(next_logits, dim=-1)
+            token = torch.multinomial(
+                probs,
+                num_samples=1,
+                generator=gen
+            ).item()
+
+        tokens.append(token)
+    
+    return (tokens, n) 
+
+@torch.no_grad()
+def generate_recompute(model, prompt, n):
+    # TODO: greedy tokens by re-running the whole sequence each step
+    tokens = []
+
+    seq = prompt.clone()
+
+    for _ in range(n):
+        logits, _ = model(seq.unsqueeze(0))
+
+        next_logits = logits[0, -1, :]
+
+        token = torch.argmax(next_logits).item()
+
+        tokens.append(token)
+
+        seq = torch.cat([
+            seq,
+            torch.tensor(
+                [token],
+            )
+        ])
+
+    return tokens, n
+
