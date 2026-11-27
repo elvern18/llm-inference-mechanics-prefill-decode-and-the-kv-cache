@@ -765,3 +765,54 @@ def mha_equals_gqa_with_all_heads(seed=0):
 
     return torch.allclose(mha_out, gqa_out)
 
+# Step 12 - inference_report
+def roofline_time(flops, bytes_moved, hw):
+    return max(flops / hw['peak_flops'] , bytes_moved / hw['bandwidth'])
+
+def inference_report(cfg, hw, prompt_len, batch):
+    # TODO: dict in the order params, weight_gb, kv_kb_per_token, max_context_batch1, decode_floor_ms,
+    #       ttft_ms, itl_ms, decode_intensity, decode_bound, crossover_batch
+    bytes_per_elem = hw['bytes_per_elem']
+    
+    params = param_count(cfg) 
+    total_weight_bytes = weight_bytes(cfg, bytes_per_elem) 
+    weight_gb = total_weight_bytes / 1e9
+    kv_kb_per_token = kv_bytes_per_token(cfg, bytes_per_elem) / 1024
+    max_context_batch1 = max_context(cfg, hw['memory_bytes'], batch, bytes_per_elem, total_weight_bytes)
+    decode_floor_ms = total_weight_bytes / hw['bandwidth'] * 1000 
+
+    ttft_ms = roofline_time(
+        prefill_flops(cfg, prompt_len) * batch, 
+        prefill_bytes(cfg, batch, prompt_len, bytes_per_elem), 
+        hw
+     ) * 1000
+    itl_ms = roofline_time(
+        decode_flops(cfg, prompt_len) * batch,
+        decode_bytes(cfg, batch, prompt_len, bytes_per_elem),
+        hw 
+    ) * 1000 
+
+    decode_intensity = decode_flops(cfg, prompt_len) / decode_bytes(cfg, batch, prompt_len, bytes_per_elem) 
+    decode_bound = bound(decode_intensity, hw['peak_flops'] / hw['bandwidth'])
+
+    crossover = crossover_batch(cfg, prompt_len, bytes_per_elem, hw['peak_flops'] / hw['bandwidth'])
+
+    return {
+        "params": params,
+        "weight_gb": round(weight_gb , 3),
+        "kv_kb_per_token": round(kv_kb_per_token, 3),
+        "max_context_batch1": max_context_batch1,
+        "decode_floor_ms": decode_floor_ms,
+        "ttft_ms": ttft_ms,
+        "itl_ms": itl_ms, 
+        "decode_intensity": decode_intensity,
+        "decode_bound": decode_bound,
+        "crossover_batch": crossover
+    }
+
+def format_report(rep):
+    res = [] 
+    for k, v in rep.items(): 
+        res.append(f"{k:20} {v}")
+    return res
+
