@@ -631,3 +631,47 @@ def time_decode_vs_batch(model, batches, context_len):
 
     return results
 
+# Step 10 - attention_cost_vs_length
+import math
+import torch
+
+def attention_fraction(cfg, context_len):
+    attention_flops = 4 * cfg["n_layers"] * cfg["d"] * context_len
+    total_flops = flops_per_token(cfg, context_len)
+
+    return round(attention_flops / total_flops, 4)
+
+@torch.no_grad()
+def attention_cost_vs_length(model, lengths):
+    results = {}
+
+    vocab = model.cfg["vocab"]
+
+    for length in lengths:
+        prompt = torch.arange(length) % vocab
+
+        elapsed = time_call(
+            lambda: model(prompt.unsqueeze(0))
+        )
+
+        results[length] = round(elapsed, 6)
+
+    return results
+
+def growth_exponent(times):
+    n_min = min(times)
+    n_max = max(times)
+
+    t_min = times[n_min]
+    t_max = times[n_max]
+
+    slope = math.log(t_max / t_min) / math.log(n_max / n_min)
+
+    return round(slope, 3)
+
+def context_where_attention_dominates(cfg):
+    return math.ceil(
+        matmul_params(cfg) /
+        (2 * cfg["n_layers"] * cfg["d"])
+    )
+
