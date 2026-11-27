@@ -675,3 +675,93 @@ def context_where_attention_dominates(cfg):
         (2 * cfg["n_layers"] * cfg["d"])
     )
 
+# Step 11 - kv_sharing_report
+import torch
+
+def kv_variants(cfg):
+    mha = cfg.copy()
+    mha["n_kv_heads"] = cfg["n_heads"]
+
+    gqa = cfg.copy()
+    gqa["n_kv_heads"] = cfg["n_kv_heads"]
+
+    mqa = cfg.copy()
+    mqa["n_kv_heads"] = 1
+
+    return {
+        "mha": mha,
+        "gqa": gqa,
+        "mqa": mqa,
+    }
+
+
+def kv_sharing_report(cfg, seq_len, batch, bytes_per_elem):
+    variants = kv_variants(cfg)
+
+    head_dim = cfg["d"] // cfg["n_heads"]
+
+    cache_bytes_mha = kv_cache_bytes(
+        variants["mha"],
+        seq_len,
+        batch,
+        bytes_per_elem,
+    )
+
+    report = []
+
+    for name in ["mha", "gqa", "mqa"]:
+        variant = variants[name]
+        n_kv_heads = variant["n_kv_heads"]
+
+        attn_params_per_layer = (
+            2 * cfg["d"] * cfg["d"]
+            + 2 * cfg["d"] * n_kv_heads * head_dim
+        )
+
+        cache_bytes = kv_cache_bytes(
+            variant,
+            seq_len,
+            batch,
+            bytes_per_elem,
+        )
+
+        saving_vs_mha = 1 - cache_bytes / cache_bytes_mha
+
+        report.append({
+            "name": name,
+            "n_kv_heads": n_kv_heads,
+            "kv_bytes_per_token": kv_bytes_per_token(
+                variant,
+                bytes_per_elem,
+            ),
+            "cache_bytes": cache_bytes,
+            "attn_params_per_layer": attn_params_per_layer,
+            "saving_vs_mha": round(saving_vs_mha, 4),
+        })
+
+    return report
+
+
+def mha_equals_gqa_with_all_heads(seed=0):
+    torch.manual_seed(seed)
+
+    mha = GQAAttention(32, 4, 4)
+    gqa = GQAAttention(32, 4, 2)
+
+    head_dim = 32 // 4
+
+    with torch.no_grad():
+        gqa.wk.weight.copy_(
+            mha.wk.weight[:2 * head_dim]
+        )
+        gqa.wv.weight.copy_(
+            mha.wv.weight[:2 * head_dim]
+        )
+
+    x = torch.randn(1, 3, 32)
+
+    mha_out, _ = mha(x)
+    gqa_out, _ = gqa(x)
+
+    return torch.allclose(mha_out, gqa_out)
+
